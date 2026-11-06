@@ -32,9 +32,8 @@ CONFIG_USER_NS=y          # 可通过 workflow 输入关闭
 **不开** `CONFIG_CGROUP_PIDS` / `CONFIG_CFS_BANDWIDTH`：它们会改
 调度器/cgroup 结构，破坏 GKI kABI，导致原厂 vendor 模块拒载。
 
-不集成 KernelSU / SUSFS。KernelSU 保持在 `init_boot`，本仓库只替换 boot 里的
-kernel 段。**如果你的 KernelSU 是 GKI 模式（住在 boot.img 里），刷这个内核会掉 root**，
-请先确认自己的 root 形态。
+不集成 KernelSU / SUSFS。已确认本机 root 是 **KernelSU LKM 模式，补丁在 `init_boot`**，
+本仓库只替换 `boot` 里的 kernel 段，**刷入不会影响 root**；请勿刷 `init_boot`。
 
 ## 构建
 
