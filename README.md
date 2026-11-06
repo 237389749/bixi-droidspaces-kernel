@@ -35,6 +35,16 @@ CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
 不集成 KernelSU / SUSFS。已确认本机 root 是 **KernelSU LKM 模式，补丁在 `init_boot`**，
 本仓库只替换 `boot` 里的 kernel 段，**刷入不会影响 root**；请勿刷 `init_boot`。
 
+## 已确认的经验（来自 6.6.77 米系实测）
+
+- 6.6.77 的小米平板 8 Pro 用 **3_4_5** 槽位成功，`6_7_8` 会卡米；
+  6.6.118 的 Pad8 Pro 则用 `6_7_8`。槽位跟内核版本走。
+- `USER_NS` 不是 Droidspaces 的 MUST HAVE，默认关闭；打开会改变小米 stock 的
+  userns 攻击面，需要 Docker/沙箱时再开。
+- 保留 `MODULE_SIG_PROTECT`（stock 就是开的）。如果刷后 `rfkill.ko` 因签名拒载，
+  再参考 GT8 Pro 的做法，把原厂 GKI 模块签名证书塞进 `CONFIG_SYSTEM_TRUSTED_KEYS`。
+- `fastboot boot` 在部分小米/真我机型上不可用；按“只能正式刷 boot + 原厂 boot 回滚”准备。
+
 ## 构建
 
 推到 GitHub 后，Actions → **build-bixi-kernel** → Run workflow。
