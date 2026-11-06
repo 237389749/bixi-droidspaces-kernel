@@ -68,7 +68,7 @@ jobs:
 
           mkdir -p "$SRC"
           cd "$SRC"
-          repo init -u https://android.googlesource.com/kernel/manifest \
+          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
             -b "${{ inputs.manifest_branch }}"
 
           # Google deletes the dated release branch (android15-6.6-2025-03)
@@ -82,7 +82,7 @@ jobs:
             .repo/manifests/default.xml
           grep -n 'name="kernel/common"' .repo/manifests/default.xml
 
-          repo sync -c -j8 --fail-fast
+          repo sync -c -j8 --fail-fast --no-clone-bundle --retry-fetches=3
 
           git -C common checkout --detach "$TAG"
           echo "kernel commit: $(git -C common rev-parse HEAD)"
