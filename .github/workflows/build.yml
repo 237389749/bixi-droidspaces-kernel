@@ -1,0 +1,241 @@
+name: build-bixi-kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_tag:
+        description: "AOSP common kernel tag"
+        required: true
+        default: "android15-6.6-2025-03_r15"
+      manifest_branch:
+        description: "kernel/manifest branch"
+        required: true
+        default: "common-android15-6.6-2025-03"
+      kabi_slot:
+        description: "SYSVIPC kABI patch slot"
+        type: choice
+        options: ["6_7_8", "1_2_3", "3_4_5"]
+        default: "6_7_8"
+      enable_userns:
+        description: "Enable CONFIG_USER_NS"
+        type: choice
+        options: ["1", "0"]
+        default: "1"
+      build_number:
+        description: "BUILD_NUMBER (cosmetic, for the version string)"
+        required: true
+        default: "13636293"
+
+permissions:
+  contents: read
+
+env:
+  SRC: ${{ github.workspace }}/kernel-src
+  DIST: ${{ github.workspace }}/dist
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/lib/jvm \
+            /usr/local/share/boost
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            repo git curl wget python3 python-is-python3 bc bison flex \
+            build-essential libssl-dev libelf-dev libncurses-dev \
+            lz4 zstd zip unzip rsync cpio dwarves device-tree-compiler \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+          pahole --version
+          repo --version | head -1
+
+      - name: Sync AOSP GKI source
+        run: |
+          set -euo pipefail
+          git config --global user.name "bixi-ci"
+          git config --global user.email "bixi-ci@localhost"
+
+          mkdir -p "$SRC"
+          cd "$SRC"
+          repo init -u https://android.googlesource.com/kernel/manifest \
+            -b "${{ inputs.manifest_branch }}"
+          repo sync -c -j8 --fail-fast
+
+          git -C common checkout --detach "${{ inputs.kernel_tag }}"
+          echo "kernel commit: $(git -C common rev-parse HEAD)"
+          head -6 common/Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL'
+
+      - name: Select AOSP clang
+        run: |
+          set -euo pipefail
+          CLANG_VER=$(grep -m1 '^CLANG_VERSION=' "$SRC/common/build.config.constants" \
+            | cut -d= -f2 | tr -d '\r' || true)
+          echo "CLANG_VERSION=$CLANG_VER"
+          CLANG_DIR=$(find "$SRC/prebuilts/clang/host/linux-x86" \
+            -maxdepth 1 -type d -name "clang-${CLANG_VER}" | head -1)
+          if [ -z "$CLANG_DIR" ]; then
+            CLANG_DIR=$(find "$SRC/prebuilts/clang/host/linux-x86" \
+              -maxdepth 1 -type d -name 'clang-r510928' | head -1)
+          fi
+          if [ -z "$CLANG_DIR" ]; then
+            echo "clang-r510928 not found; available:"
+            ls "$SRC/prebuilts/clang/host/linux-x86" || true
+            exit 1
+          fi
+          echo "$CLANG_DIR/bin" >> "$GITHUB_PATH"
+          "$CLANG_DIR/bin/clang" --version | head -2
+          "$CLANG_DIR/bin/clang" --version | grep -q 'r510928' \
+            || { echo "clang is not r510928; CFI may fail"; exit 1; }
+
+      - name: Apply SYSVIPC kABI patch
+        run: |
+          set -euo pipefail
+          cd "$SRC/common"
+          PATCH="$GITHUB_WORKSPACE/patches/001.GKI-below-6.12-fix_sysvipc_kabi_${{ inputs.kabi_slot }}.patch"
+          patch -p1 --forward < "$PATCH"
+          grep -n "ANDROID_KABI_USE" include/linux/sched.h | tail -5
+
+      - name: Configure kernel
+        run: |
+          set -euo pipefail
+          cd "$SRC/common"
+          mkdir -p out
+          cp "$GITHUB_WORKSPACE/configs/bixi-stock.config" out/.config
+
+          scripts/config --file out/.config \
+            -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS -e PID_NS -e DEVTMPFS \
+            -e MACVLAN -e IP6_NF_NAT -e IP6_NF_TARGET_MASQUERADE \
+            -e NETFILTER_XT_MATCH_ADDRTYPE \
+            -d DEVTMPFS_MOUNT -d LOCALVERSION_AUTO
+
+          if [ "${{ inputs.enable_userns }}" = "1" ]; then
+            scripts/config --file out/.config -e USER_NS
+          fi
+
+          make ARCH=arm64 LLVM=1 LLVM_IAS=1 O=out olddefconfig
+
+          for k in PID_NS IPC_NS SYSVIPC POSIX_MQUEUE DEVTMPFS MACVLAN; do
+            grep -q "^CONFIG_$k=y" out/.config || { echo "missing CONFIG_$k"; exit 1; }
+          done
+          for k in LTO_NONE CFI_CLANG SHADOW_CALL_STACK MODVERSIONS \
+                   DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES; do
+            grep -q "^CONFIG_$k=y" out/.config || { echo "ABI-critical CONFIG_$k lost"; exit 1; }
+          done
+          grep -q '^# CONFIG_CFS_BANDWIDTH is not set' out/.config
+          grep -q '^# CONFIG_CGROUP_PIDS is not set' out/.config
+
+      - name: Build kernel and modules
+        run: |
+          set -euo pipefail
+          cd "$SRC/common"
+          # keep the version string clean (no "+" for a patched tree)
+          sed -i 's/echo "+"//' scripts/setlocalversion 2>/dev/null || true
+          make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- O=out Image modules
+          echo "--- kernel banner ---"
+          strings out/arch/arm64/boot/Image | grep -m1 '^Linux version '
+
+      - name: Gate vendor symbol CRCs
+        run: |
+          set -euo pipefail
+          cd "$SRC/common"
+          echo "--- module_layout ---"
+          grep -w module_layout out/Module.symvers
+          grep -q "$(printf '0x4e276f37\tmodule_layout\t')" out/Module.symvers \
+            || { echo "module_layout CRC is not the stock bixi value"; exit 1; }
+
+          echo "--- strict: rfkill (6.6.77, 58 imports) ---"
+          python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
+            out/Module.symvers "$GITHUB_WORKSPACE/tests/vendor-rfkill.tsv"
+
+          echo "--- tolerant: goodix (6.6.57, module-to-module symbols allowed) ---"
+          python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
+            out/Module.symvers "$GITHUB_WORKSPACE/tests/vendor-goodix.tsv" --allow-missing
+
+      - name: Pack boot image
+        run: |
+          set -euo pipefail
+          cd "$SRC"
+          source "$GITHUB_WORKSPACE/configs/bixi-boot-avb.env"
+
+          MKBOOTIMG=$(find "$SRC" -maxdepth 5 -name mkbootimg.py | head -1)
+          AVBTOOL=$(find "$SRC/prebuilts" -maxdepth 8 -name avbtool | head -1)
+          UNPACK=$(find "$SRC" -maxdepth 5 -name unpack_bootimg.py | head -1)
+          [ -n "$MKBOOTIMG" ] && [ -n "$AVBTOOL" ] && [ -n "$UNPACK" ] || {
+            echo "mkbootimg/avbtool not found"; exit 1; }
+
+          mkdir -p "$DIST"
+          python3 "$MKBOOTIMG" \
+            --header_version 4 \
+            --kernel "$SRC/common/out/arch/arm64/boot/Image" \
+            --ramdisk /dev/null \
+            --cmdline '' \
+            --output "$DIST/boot-bixi-ds.img"
+
+          "$AVBTOOL" add_hash_footer \
+            --image "$DIST/boot-bixi-ds.img" \
+            --partition_name boot \
+            --partition_size "$PARTITION_SIZE" \
+            --algorithm NONE --hash_algorithm sha256 \
+            --rollback_index "$ROLLBACK_INDEX" \
+            --prop "com.android.build.boot.os_version:$OS_VERSION" \
+            --prop "com.android.build.boot.fingerprint:$FINGERPRINT" \
+            --prop "com.android.build.boot.security_patch:$SECURITY_PATCH"
+
+          stat -c 'boot image size: %s' "$DIST/boot-bixi-ds.img"
+          test "$(stat -c '%s' "$DIST/boot-bixi-ds.img")" -eq "$PARTITION_SIZE"
+          "$AVBTOOL" info_image --image "$DIST/boot-bixi-ds.img" \
+            | tee "$DIST/GENERATED-BOOT-AVB-INFO.txt"
+
+          python3 "$UNPACK" --boot_img "$DIST/boot-bixi-ds.img" --out "$DIST/verify"
+          cmp "$SRC/common/out/arch/arm64/boot/Image" "$DIST/verify/kernel"
+
+      - name: Collect artifacts
+        run: |
+          set -euo pipefail
+          cp "$SRC/common/out/arch/arm64/boot/Image" "$DIST/Image"
+          cp "$SRC/common/out/Module.symvers" "$DIST/Module.symvers"
+          diff <(grep -E '^CONFIG_|^# CONFIG_' "$GITHUB_WORKSPACE/configs/bixi-stock.config" | sort) \
+               <(grep -E '^CONFIG_|^# CONFIG_' "$SRC/common/out/.config" | sort) \
+               > "$DIST/config.diff" || true
+
+          {
+            echo "kernel tag: ${{ inputs.kernel_tag }}"
+            echo "manifest branch: ${{ inputs.manifest_branch }}"
+            echo "kernel commit: $(git -C "$SRC/common" rev-parse HEAD)"
+            echo "kabi slot: ${{ inputs.kabi_slot }}"
+            echo "enable userns: ${{ inputs.enable_userns }}"
+            echo "build number: ${{ inputs.build_number }}"
+            echo "clang: $(clang --version | head -1)"
+            echo "kernel banner: $(strings "$DIST/Image" | grep -m1 '^Linux version ')"
+            echo "module_layout: $(grep -w module_layout "$DIST/Module.symvers")"
+            echo "boot image sha256: $(sha256sum "$DIST/boot-bixi-ds.img" | cut -d' ' -f1)"
+          } > "$DIST/BUILD-INFO.txt"
+
+          cat "$DIST/BUILD-INFO.txt"
+          ls -lh "$DIST"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bixi-kernel-${{ inputs.kernel_tag }}-${{ inputs.kabi_slot }}
+          path: |
+            dist/boot-bixi-ds.img
+            dist/Image
+            dist/Module.symvers
+            dist/config.diff
+            dist/BUILD-INFO.txt
+            dist/GENERATED-BOOT-AVB-INFO.txt
+          if-no-files-found: error
+          retention-days: 30

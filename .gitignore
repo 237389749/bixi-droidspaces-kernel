@@ -1,0 +1,7 @@
+dist/
+out/
+kernel-src/
+*.img
+*.zip
+*.ko
+!tests/*.tsv
