@@ -32,6 +32,10 @@ CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
 **不开** `CONFIG_CGROUP_PIDS` / `CONFIG_CFS_BANDWIDTH`：它们会改
 调度器/cgroup 结构，破坏 GKI kABI，导致原厂 vendor 模块拒载。
 
+GKI 的 plain make 不会生成 `abi_symbollist.raw`（那是 Kleaf 的产物），
+modpost 会因此失败，所以这里显式关掉 `CONFIG_TRIM_UNUSED_KSYMS`。
+代价是导出符号比原厂多，但已有符号的 CRC 不变，vendor 模块不受影响。
+
 不集成 KernelSU / SUSFS。已确认本机 root 是 **KernelSU LKM 模式，补丁在 `init_boot`**，
 本仓库只替换 `boot` 里的 kernel 段，**刷入不会影响 root**；请勿刷 `init_boot`。
 
