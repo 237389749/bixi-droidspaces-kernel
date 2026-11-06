@@ -23,7 +23,7 @@ CONFIG_MACVLAN=y
 CONFIG_IP6_NF_NAT=y
 CONFIG_IP6_NF_TARGET_MASQUERADE=y
 CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
-CONFIG_USER_NS=y          # 可通过 workflow 输入关闭
+# CONFIG_USER_NS=y        # 默认关闭，可通过 workflow 输入打开
 ```
 
 `SYSVIPC` 会给 `task_struct` 加字段，必须打官方 kABI 补丁
@@ -43,8 +43,8 @@ CONFIG_USER_NS=y          # 可通过 workflow 输入关闭
 |---|---|---|
 | `kernel_tag` | `android15-6.6-2025-03_r15` | 必须与原厂 `uname -r` 的 commit 对应 |
 | `manifest_branch` | `common-android15-6.6-2025-03` | 与 tag 配套 |
-| `kabi_slot` | `6_7_8` | 若 CRC 闸门失败，依次试 `1_2_3`、`3_4_5` |
-| `enable_userns` | `1` | 关掉可少一个变量；Docker/沙箱需要它 |
+| `kabi_slot` | `3_4_5` | 6.6.77 的小米 8E 实测用 3_4_5；若 CRC 闸门失败再试 `1_2_3`、`6_7_8` |
+| `enable_userns` | `0` | 先关掉少一个变量；Docker/沙箱需要时再开 |
 | `build_number` | `13636293` | 仅影响版本串，不影响模块加载 |
 
 流程：
