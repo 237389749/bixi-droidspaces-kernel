@@ -57,6 +57,7 @@ modpost 会因此失败，所以这里显式关掉 `CONFIG_TRIM_UNUSED_KSYMS`。
 |---|---|---|
 | `kernel_tag` | `android15-6.6-2025-03_r15` | 必须与原厂 `uname -r` 的 commit 对应 |
 | `manifest_branch` | `common-android15-6.6-2025-03` | 与 tag 配套 |
+| `kmi_tag` | `android15-8` | 版本串里的 KMI 代次；6.6 gen8 用这个，6.12 改 `android16-5` |
 | `kabi_slot` | `3_4_5` | 6.6.77 的小米 8E 实测用 3_4_5；若 CRC 闸门失败再试 `1_2_3`、`6_7_8` |
 | `enable_userns` | `0` | 先关掉少一个变量；Docker/沙箱需要时再开 |
 | `build_number` | `13636293` | 仅影响版本串，不影响模块加载 |

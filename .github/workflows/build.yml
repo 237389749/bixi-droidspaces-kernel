@@ -11,6 +11,10 @@ on:
         description: "kernel/manifest branch"
         required: true
         default: "common-android15-6.6-2025-03"
+      kmi_tag:
+        description: "KMI generation tag for the version string"
+        required: true
+        default: "android15-8"
       kabi_slot:
         description: "SYSVIPC kABI patch slot"
         type: choice
@@ -125,6 +129,13 @@ jobs:
           mkdir -p out
           cp "$GITHUB_WORKSPACE/configs/bixi-stock.config" out/.config
 
+          # plain make does not inject -android15-8-g<hash>-ab<build>, but
+          # stock does, and KernelSU/LKM tooling may parse it. Force the
+          # exact stock release string.
+          GHASH=$(git -C "$SRC/common" rev-parse --short=12 HEAD)
+          scripts/config --file out/.config --set-str LOCALVERSION \
+            "-${{ inputs.kmi_tag }}-g${GHASH}-ab${{ inputs.build_number }}-4k"
+
           scripts/config --file out/.config \
             -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS -e PID_NS -e DEVTMPFS \
             -e MACVLAN -e IP6_NF_NAT -e IP6_NF_TARGET_MASQUERADE \
@@ -146,6 +157,7 @@ jobs:
           done
           grep -q '^# CONFIG_CFS_BANDWIDTH is not set' out/.config
           grep -q '^# CONFIG_CGROUP_PIDS is not set' out/.config
+          grep -q "^CONFIG_LOCALVERSION=\"-${{ inputs.kmi_tag }}-g" out/.config
           # GKI's plain make does not generate abi_symbollist.raw (Kleaf does),
           # and modpost then fails. Disable TRIM so Module.symvers does not need it.
           ! grep -q '^CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
