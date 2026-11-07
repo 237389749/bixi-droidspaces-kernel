@@ -1,26 +1,28 @@
 # vendor import tables
 
-这些表来自 bixi 原厂内核的 vendor 模块，由模块 ELF 的 `__versions` 段生成：
+These tables are generated from the `__versions` section of vendor modules
+shipped in the bixi ROM (via the TWRP device tree):
 
 ```
 <crc32>\t<symbol>\t<source>
 ```
 
-- `vendor-rfkill.tsv`：`rfkill.ko`，vermagic
-  `6.6.77-android15-8-g4a507830d890-ab13636293-4k`，58 个导入符号。
-  这是**严格**闸门：58 个符号必须全部由新内核导出且 CRC 一致。
-- `vendor-goodix.tsv`：`goodix_core.ko`，vermagic `6.6.57-...`，155 个导入符号。
-  其中约 14 个是模块间/树外符号，不在 vmlinux 的 `Module.symvers` 里，
-  所以 workflow 用 `--allow-missing`，但仍要求所有能对上的符号 CRC 一致。
+- `vendor-rfkill.tsv`: `rfkill.ko`, vermagic
+  `6.6.77-android15-8-g4a507830d890-ab13636293-4k`, 58 imports.
+  **Strict gate**: every symbol must be exported by the kernel with the same CRC.
+- `vendor-goodix.tsv`, `vendor-synaptics.tsv`, `vendor-xiaomi-touch.tsv`,
+  `vendor-nxp.tsv`, `vendor-qca.tsv`: older 6.6.57 modules. They can import
+  symbols provided by other vendor modules (cfg80211, xiaomi_touch, etc.),
+  so the workflow runs them with `--allow-missing`: every symbol that *is*
+  in vmlinux must match, missing ones are reported as WARN.
 
-模块来自 `flip/flipRecovery` 的 TWRP 设备树（bixi）。`rfkill.ko` 的 vermagic
-与 `OS3.0.304.0` 的 boot 内核完全一致，可视为权威样本。
+All tables come from the `flip/flipRecovery` TWRP trees (bixi/thales).
+`rfkill.ko` matches the OS3.0.304.0 boot kernel exactly; the others are
+6.6.57 but already showed zero CRC mismatches against the 6.6.118 reference
+table, so they are useful as extra coverage.
 
-重新生成（在仓库根目录）：
+Regenerate:
 
-```bash
-python3 scripts/gen_vendor_tsv.py /path/to/rfkill.ko > tests/vendor-rfkill.tsv
+```sh
+python3 scripts/gen_vendor_tsv.py /path/to/module.ko source > tests/vendor-x.tsv
 ```
-
-`gen_vendor_tsv.py` 目前没有入库；生成逻辑就是遍历 ELF section，
-取名为 `__versions` 的段，按 64 字节一条解析（前 4 字节 CRC，后 56 字节符号名）。

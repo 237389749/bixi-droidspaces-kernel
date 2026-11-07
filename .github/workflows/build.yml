@@ -186,9 +186,11 @@ jobs:
           python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
             out/Module.symvers "$GITHUB_WORKSPACE/tests/vendor-rfkill.tsv"
 
-          echo "--- tolerant: goodix (6.6.57, module-to-module symbols allowed) ---"
-          python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
-            out/Module.symvers "$GITHUB_WORKSPACE/tests/vendor-goodix.tsv" --allow-missing
+          echo "--- tolerant: other bixi vendor modules (module-to-module symbols allowed) ---"
+          for t in vendor-goodix vendor-synaptics vendor-xiaomi-touch vendor-nxp vendor-qca; do
+            python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
+              out/Module.symvers "$GITHUB_WORKSPACE/tests/$t.tsv" --allow-missing
+          done
 
       - name: Pack boot image
         run: |

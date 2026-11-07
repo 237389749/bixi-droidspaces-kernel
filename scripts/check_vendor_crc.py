@@ -21,6 +21,7 @@ def load_symvers(path):
     table = {}
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
+            line = line.lstrip("\ufeff")
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 2:
                 continue
@@ -35,7 +36,7 @@ def load_table(path):
     rows = []
     with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            line = line.strip()
+            line = line.lstrip("\ufeff").strip()
             if not line or line.startswith("#"):
                 continue
             fields = line.split("\t")
