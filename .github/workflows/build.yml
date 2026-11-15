@@ -129,6 +129,16 @@ jobs:
           mkdir -p out
           cp "$GITHUB_WORKSPACE/configs/bixi-stock.config" out/.config
 
+          # The stock GKI modules are signed by the vendor build key.  Without
+          # trusting that key the kernel treats them as vendor modules
+          # (sig_ok=false) and rejects their use/export of GKI protected
+          # symbols with -EACCES (rfkill, cfg80211, qca, qmi, rmnet...).
+          # Embed the stock certificate so their signatures verify.
+          install -D "$GITHUB_WORKSPACE/configs/stock_gki_module_signing.pem" \
+            "$SRC/common/certs/stock_gki_module_signing.pem"
+          scripts/config --file out/.config --set-str SYSTEM_TRUSTED_KEYS \
+            "certs/stock_gki_module_signing.pem"
+
           # plain make does not inject -android15-8-g<hash>-ab<build>, but
           # stock does, and KernelSU/LKM tooling may parse it. Force the
           # exact stock release string.
@@ -161,6 +171,9 @@ jobs:
           # GKI's plain make does not generate abi_symbollist.raw (Kleaf does),
           # and modpost then fails. Disable TRIM so Module.symvers does not need it.
           ! grep -q '^CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
+          grep -q '^CONFIG_SYSTEM_TRUSTED_KEYRING=y' out/.config
+          grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS="certs/stock_gki_module_signing.pem"' out/.config
+          grep -q '^CONFIG_MODULE_SIG_PROTECT=y' out/.config
 
       - name: Build kernel and modules
         run: |
@@ -172,6 +185,13 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- O=out Image modules
           echo "--- kernel banner ---"
           strings out/arch/arm64/boot/Image | grep -m1 '^Linux version '
+
+      - name: Gate module signing certificate
+        run: |
+          set -euo pipefail
+          FPR=$(cat "$GITHUB_WORKSPACE/configs/stock_gki_module_signing.fingerprint")
+          python3 "$GITHUB_WORKSPACE/scripts/check_image_certs.py" \
+            "$SRC/common/out/arch/arm64/boot/Image" "$FPR"
 
       - name: Gate vendor symbol CRCs
         run: |
