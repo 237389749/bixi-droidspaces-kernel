@@ -3,32 +3,22 @@ name: build-bixi-kernel
 on:
   workflow_dispatch:
     inputs:
-      kernel_tag:
-        description: "AOSP common kernel tag"
-        required: true
-        default: "android15-6.6-2025-03_r15"
-      manifest_branch:
-        description: "kernel/manifest branch"
-        required: true
-        default: "common-android15-6.6-2025-03"
-      kmi_tag:
-        description: "KMI generation tag for the version string"
-        required: true
-        default: "android15-8"
-      kabi_slot:
-        description: "SYSVIPC kABI patch slot"
+      profile:
+        description: "Target profile (ROM / kernel)"
         type: choice
-        options: ["3_4_5", "1_2_3", "6_7_8"]
-        default: "3_4_5"
+        options:
+          - "6.6.77-os3.0.304.0"
+          - "6.6.118-os4.0.3"
+        default: "6.6.77-os3.0.304.0"
       enable_userns:
         description: "Enable CONFIG_USER_NS"
         type: choice
         options: ["0", "1"]
         default: "0"
-      build_number:
-        description: "BUILD_NUMBER (cosmetic, for the version string)"
-        required: true
-        default: "13636293"
+      kabi_slot_override:
+        description: "Override profile kABI slot (optional)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -45,6 +35,34 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Load profile
+        run: |
+          set -euo pipefail
+          P="$GITHUB_WORKSPACE/profiles/${{ inputs.profile }}"
+          test -f "$P/profile.env"
+          set -a
+          . "$P/profile.env"
+          set +a
+          if [ -n "${{ inputs.kabi_slot_override }}" ]; then
+            KABI_SLOT="${{ inputs.kabi_slot_override }}"
+          fi
+          {
+            echo "PROFILE_DIR=$P"
+            echo "PROFILE_NAME=$PROFILE_NAME"
+            echo "KERNEL_REF=$KERNEL_REF"
+            echo "MANIFEST_BRANCH=$MANIFEST_BRANCH"
+            echo "MANIFEST_BASE_TAG=$MANIFEST_BASE_TAG"
+            echo "REPO_FULL=$REPO_FULL"
+            echo "KMI_TAG=$KMI_TAG"
+            echo "KABI_SLOT=$KABI_SLOT"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+            echo "EXPECTED_MODULE_LAYOUT=$EXPECTED_MODULE_LAYOUT"
+            echo "EXPECTED_KERNEL_RELEASE=$EXPECTED_KERNEL_RELEASE"
+            echo "STRICT_TABLE=$STRICT_TABLE"
+            echo "TOLERANT_TABLES=$TOLERANT_TABLES"
+          } >> "$GITHUB_ENV"
+          cat "$GITHUB_ENV" | tail -20
 
       - name: Free disk space
         run: |
@@ -72,23 +90,31 @@ jobs:
 
           mkdir -p "$SRC"
           cd "$SRC"
-          repo init --depth=1 -u https://android.googlesource.com/kernel/manifest \
-            -b "${{ inputs.manifest_branch }}"
 
-          # Google deletes the dated release branch (android15-6.6-2025-03)
-          # after a while, but the release tag survives. Point the common
-          # project at the tag explicitly, otherwise repo sync fails with
-          # "couldn't find remote ref refs/heads/android15-6.6-2025-03".
-          TAG="${{ inputs.kernel_tag }}"
-          BRANCH="${{ inputs.manifest_branch }}"
-          BRANCH="${BRANCH#common-}"
-          sed -i "/name=\"kernel\/common\"/ s|revision=\"[^\"]*\"|revision=\"refs/tags/${TAG}\"|" \
-            .repo/manifests/default.xml
+          DEPTH_FLAG="--depth=1"
+          if [ "${REPO_FULL:-0}" = "1" ]; then
+            DEPTH_FLAG=""
+          fi
+          repo init $DEPTH_FLAG -u https://android.googlesource.com/kernel/manifest \
+            -b "$MANIFEST_BRANCH"
+
+          if [ -n "${MANIFEST_BASE_TAG:-}" ]; then
+            # Google deletes dated release branches; point the common project
+            # at the release tag, otherwise repo sync fails with
+            # "couldn't find remote ref refs/heads/android15-6.6-<month>".
+            echo "pointing common at refs/tags/$MANIFEST_BASE_TAG"
+            sed -i "/name=\"kernel\/common\"/ s|revision=\"[^\"]*\"|revision=\"refs/tags/${MANIFEST_BASE_TAG}\"|" \
+              .repo/manifests/default.xml
+          fi
           grep -n 'name="kernel/common"' .repo/manifests/default.xml
 
           repo sync -c -j8 --fail-fast --no-clone-bundle --retry-fetches=3
 
-          git -C common checkout --detach "$TAG"
+          if ! git -C common cat-file -e "${KERNEL_REF}^{commit}" 2>/dev/null; then
+            echo "fetching $KERNEL_REF"
+            git -C common fetch --depth=1 origin "$KERNEL_REF"
+          fi
+          git -C common checkout --detach "$KERNEL_REF"
           echo "kernel commit: $(git -C common rev-parse HEAD)"
           head -6 common/Makefile | grep -E 'VERSION|PATCHLEVEL|SUBLEVEL'
 
@@ -118,7 +144,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC/common"
-          PATCH="$GITHUB_WORKSPACE/patches/001.GKI-below-6.12-fix_sysvipc_kabi_${{ inputs.kabi_slot }}.patch"
+          PATCH="$GITHUB_WORKSPACE/patches/001.GKI-below-6.12-fix_sysvipc_kabi_${KABI_SLOT}.patch"
           patch -p1 --forward < "$PATCH"
           grep -n "ANDROID_KABI_USE" include/linux/sched.h | tail -5
 
@@ -127,24 +153,22 @@ jobs:
           set -euo pipefail
           cd "$SRC/common"
           mkdir -p out
-          cp "$GITHUB_WORKSPACE/configs/bixi-stock.config" out/.config
+          cp "$PROFILE_DIR/stock.config" out/.config
 
           # The stock GKI modules are signed by the vendor build key.  Without
           # trusting that key the kernel treats them as vendor modules
           # (sig_ok=false) and rejects their use/export of GKI protected
           # symbols with -EACCES (rfkill, cfg80211, qca, qmi, rmnet...).
-          # Embed the stock certificate so their signatures verify.
-          install -D "$GITHUB_WORKSPACE/configs/stock_gki_module_signing.pem" \
+          install -D "$PROFILE_DIR/stock_gki_module_signing.pem" \
             "$SRC/common/certs/stock_gki_module_signing.pem"
           scripts/config --file out/.config --set-str SYSTEM_TRUSTED_KEYS \
             "certs/stock_gki_module_signing.pem"
 
           # plain make does not inject -android15-8-g<hash>-ab<build>, but
-          # stock does, and KernelSU/LKM tooling may parse it. Force the
-          # exact stock release string.
+          # stock does, and KernelSU/LKM tooling may parse it.
           GHASH=$(git -C "$SRC/common" rev-parse --short=12 HEAD)
           scripts/config --file out/.config --set-str LOCALVERSION \
-            "-${{ inputs.kmi_tag }}-g${GHASH}-ab${{ inputs.build_number }}-4k"
+            "-${KMI_TAG}-g${GHASH}-ab${BUILD_NUMBER}-4k"
 
           scripts/config --file out/.config \
             -e SYSVIPC -e POSIX_MQUEUE -e IPC_NS -e PID_NS -e DEVTMPFS \
@@ -167,9 +191,9 @@ jobs:
           done
           grep -q '^# CONFIG_CFS_BANDWIDTH is not set' out/.config
           grep -q '^# CONFIG_CGROUP_PIDS is not set' out/.config
-          grep -q "^CONFIG_LOCALVERSION=\"-${{ inputs.kmi_tag }}-g" out/.config
-          # GKI's plain make does not generate abi_symbollist.raw (Kleaf does),
-          # and modpost then fails. Disable TRIM so Module.symvers does not need it.
+          grep -q "^CONFIG_LOCALVERSION=\"-${KMI_TAG}-g" out/.config
+          # GKI's plain make does not generate abi_symbollist.raw (Kleaf does);
+          # modpost then fails. Disable TRIM so Module.symvers does not need it.
           ! grep -q '^CONFIG_TRIM_UNUSED_KSYMS=y' out/.config
           grep -q '^CONFIG_SYSTEM_TRUSTED_KEYRING=y' out/.config
           grep -q '^CONFIG_SYSTEM_TRUSTED_KEYS="certs/stock_gki_module_signing.pem"' out/.config
@@ -179,7 +203,6 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC/common"
-          # keep the version string clean (no "+" for a patched tree)
           sed -i 's/echo "+"//' scripts/setlocalversion 2>/dev/null || true
           make -j"$(nproc)" ARCH=arm64 LLVM=1 LLVM_IAS=1 \
             CROSS_COMPILE=aarch64-linux-gnu- O=out Image modules
@@ -189,7 +212,7 @@ jobs:
       - name: Gate module signing certificate
         run: |
           set -euo pipefail
-          FPR=$(cat "$GITHUB_WORKSPACE/configs/stock_gki_module_signing.fingerprint")
+          FPR=$(cat "$PROFILE_DIR/stock_gki_module_signing.fingerprint")
           python3 "$GITHUB_WORKSPACE/scripts/check_image_certs.py" \
             "$SRC/common/out/arch/arm64/boot/Image" "$FPR"
 
@@ -197,17 +220,21 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC/common"
-          echo "--- module_layout ---"
+          echo "--- module_layout (expected ${EXPECTED_MODULE_LAYOUT}) ---"
           grep -w module_layout out/Module.symvers
-          grep -q "$(printf '0x4e276f37\tmodule_layout\t')" out/Module.symvers \
-            || { echo "module_layout CRC is not the stock bixi value"; exit 1; }
+          grep -q "$(printf '%s\tmodule_layout\t' "$EXPECTED_MODULE_LAYOUT")" out/Module.symvers \
+            || { echo "module_layout CRC is not the profile value"; exit 1; }
 
-          echo "--- strict: rfkill (6.6.77, 58 imports) ---"
-          python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
-            out/Module.symvers "$GITHUB_WORKSPACE/tests/vendor-rfkill.tsv"
+          if [ -n "${STRICT_TABLE:-}" ]; then
+            echo "--- strict: $STRICT_TABLE ---"
+            python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
+              out/Module.symvers "$GITHUB_WORKSPACE/$STRICT_TABLE"
+          else
+            echo "--- no strict vendor table for this profile (yet) ---"
+          fi
 
-          echo "--- tolerant: other bixi vendor modules (module-to-module symbols allowed) ---"
-          for t in vendor-goodix vendor-synaptics vendor-xiaomi-touch vendor-nxp vendor-qca; do
+          for t in ${TOLERANT_TABLES:-}; do
+            echo "--- tolerant: $t ---"
             python3 "$GITHUB_WORKSPACE/scripts/check_vendor_crc.py" \
               out/Module.symvers "$GITHUB_WORKSPACE/tests/$t.tsv" --allow-missing
           done
@@ -216,7 +243,8 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC"
-          source "$GITHUB_WORKSPACE/configs/bixi-boot-avb.env"
+          source "$PROFILE_DIR/boot-avb.env"
+          BOOT="$DIST/boot-bixi-${PROFILE_NAME}.img"
 
           MKBOOTIMG=$(find "$SRC" -maxdepth 5 -name mkbootimg.py | head -1)
           AVBTOOL=$(find "$SRC/prebuilts" -maxdepth 8 -name avbtool | head -1)
@@ -230,10 +258,10 @@ jobs:
             --kernel "$SRC/common/out/arch/arm64/boot/Image" \
             --ramdisk /dev/null \
             --cmdline '' \
-            --output "$DIST/boot-bixi-ds.img"
+            --output "$BOOT"
 
           "$AVBTOOL" add_hash_footer \
-            --image "$DIST/boot-bixi-ds.img" \
+            --image "$BOOT" \
             --partition_name boot \
             --partition_size "$PARTITION_SIZE" \
             --algorithm NONE --hash_algorithm sha256 \
@@ -242,12 +270,12 @@ jobs:
             --prop "com.android.build.boot.fingerprint:$FINGERPRINT" \
             --prop "com.android.build.boot.security_patch:$SECURITY_PATCH"
 
-          stat -c 'boot image size: %s' "$DIST/boot-bixi-ds.img"
-          test "$(stat -c '%s' "$DIST/boot-bixi-ds.img")" -eq "$PARTITION_SIZE"
-          "$AVBTOOL" info_image --image "$DIST/boot-bixi-ds.img" \
+          stat -c 'boot image size: %s' "$BOOT"
+          test "$(stat -c '%s' "$BOOT")" -eq "$PARTITION_SIZE"
+          "$AVBTOOL" info_image --image "$BOOT" \
             | tee "$DIST/GENERATED-BOOT-AVB-INFO.txt"
 
-          python3 "$UNPACK" --boot_img "$DIST/boot-bixi-ds.img" --out "$DIST/verify"
+          python3 "$UNPACK" --boot_img "$BOOT" --out "$DIST/verify"
           cmp "$SRC/common/out/arch/arm64/boot/Image" "$DIST/verify/kernel"
 
       - name: Collect artifacts
@@ -255,21 +283,25 @@ jobs:
           set -euo pipefail
           cp "$SRC/common/out/arch/arm64/boot/Image" "$DIST/Image"
           cp "$SRC/common/out/Module.symvers" "$DIST/Module.symvers"
-          diff <(grep -E '^CONFIG_|^# CONFIG_' "$GITHUB_WORKSPACE/configs/bixi-stock.config" | sort) \
+          diff <(grep -E '^CONFIG_|^# CONFIG_' "$PROFILE_DIR/stock.config" | sort) \
                <(grep -E '^CONFIG_|^# CONFIG_' "$SRC/common/out/.config" | sort) \
                > "$DIST/config.diff" || true
+          BOOT="$DIST/boot-bixi-${PROFILE_NAME}.img"
 
           {
-            echo "kernel tag: ${{ inputs.kernel_tag }}"
-            echo "manifest branch: ${{ inputs.manifest_branch }}"
+            echo "profile: $PROFILE_NAME"
+            echo "kernel ref: $KERNEL_REF"
+            echo "manifest branch: $MANIFEST_BRANCH"
             echo "kernel commit: $(git -C "$SRC/common" rev-parse HEAD)"
-            echo "kabi slot: ${{ inputs.kabi_slot }}"
+            echo "kabi slot: $KABI_SLOT"
             echo "enable userns: ${{ inputs.enable_userns }}"
-            echo "build number: ${{ inputs.build_number }}"
+            echo "build number: $BUILD_NUMBER"
+            echo "expected release: $EXPECTED_KERNEL_RELEASE"
             echo "clang: $(clang --version | head -1)"
             echo "kernel banner: $(strings "$DIST/Image" | grep -m1 '^Linux version ')"
             echo "module_layout: $(grep -w module_layout "$DIST/Module.symvers")"
-            echo "boot image sha256: $(sha256sum "$DIST/boot-bixi-ds.img" | cut -d' ' -f1)"
+            echo "stock cert fingerprint: $(cat "$PROFILE_DIR/stock_gki_module_signing.fingerprint")"
+            echo "boot image sha256: $(sha256sum "$BOOT" | cut -d' ' -f1)"
           } > "$DIST/BUILD-INFO.txt"
 
           cat "$DIST/BUILD-INFO.txt"
@@ -278,13 +310,8 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: bixi-kernel-${{ inputs.kernel_tag }}-${{ inputs.kabi_slot }}
+          name: bixi-kernel-${{ inputs.profile }}
           path: |
-            dist/boot-bixi-ds.img
-            dist/Image
-            dist/Module.symvers
-            dist/config.diff
-            dist/BUILD-INFO.txt
-            dist/GENERATED-BOOT-AVB-INFO.txt
+            dist/
           if-no-files-found: error
           retention-days: 30
