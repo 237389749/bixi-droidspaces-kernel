@@ -20,10 +20,10 @@ Each profile contains:
 
 ## 6.6.118-os4.0.3 notes
 
-- Source commit `0908354dac1b`; the exact AOSP tag is not resolved yet
-  (the GitHub mirror is stale and googlesource was unreachable from the dev
-  machine). The workflow uses `common-android15-6.6` and checks out the commit.
-  If the commit is not on that branch, the build fails; resolve the tag then.
+- Source commit `0908354dac1b8a65a215da1ca0c9c78dcd83014f`; the workflow uses
+  `common-android15-6.6` and checks out the commit. This was verified in CI
+  (run 44090419914, success), so no AOSP tag is required for now.
+  If a future build cannot find the commit, pin the matching `_rN` tag.
 - `CONFIG_GKI_DYNAMIC_TASK_STRUCT_SIZE=y` and
   `CONFIG_GKI_TASK_STRUCT_VENDOR_SIZE_MAX=1024` are new versus 6.6.77.
   The kABI slot default is `6_7_8` (Pad8 Pro 6.6.118 evidence), but it must
